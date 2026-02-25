@@ -1,0 +1,7 @@
+TRANSFORM_NULL(0.0)
+  SCALE(10.000000000000568)
+    AS_PERCENT(groupBy=[])
+      MOVING(1d, SUM)
+        FETCH({name=[errors]}, !{})
+      MOVING(1d, SUM)
+        FETCH({name=[total]}, !{})

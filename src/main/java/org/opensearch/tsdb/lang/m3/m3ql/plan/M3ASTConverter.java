@@ -8,6 +8,7 @@
 package org.opensearch.tsdb.lang.m3.m3ql.plan;
 
 import org.opensearch.tsdb.lang.m3.common.Constants;
+import org.opensearch.tsdb.lang.m3.common.M3Duration;
 import org.opensearch.tsdb.lang.m3.common.Utils;
 import org.opensearch.tsdb.lang.m3.m3ql.parser.nodes.FunctionNode;
 import org.opensearch.tsdb.lang.m3.m3ql.parser.nodes.GroupNode;
@@ -15,7 +16,13 @@ import org.opensearch.tsdb.lang.m3.m3ql.parser.nodes.M3ASTNode;
 import org.opensearch.tsdb.lang.m3.m3ql.parser.nodes.PipelineNode;
 import org.opensearch.tsdb.lang.m3.m3ql.parser.nodes.RootNode;
 import org.opensearch.tsdb.lang.m3.m3ql.parser.nodes.ValueNode;
+import org.opensearch.tsdb.lang.m3.common.AggregationType;
+import org.opensearch.tsdb.lang.m3.m3ql.plan.nodes.AggregationPlanNode;
 import org.opensearch.tsdb.lang.m3.m3ql.plan.nodes.AsPercentPlanNode;
+import org.opensearch.tsdb.lang.m3.m3ql.plan.nodes.MovingPlanNode;
+import org.opensearch.tsdb.lang.m3.m3ql.plan.nodes.ScalePlanNode;
+import org.opensearch.tsdb.lang.m3.m3ql.plan.nodes.TransformNullPlanNode;
+import org.opensearch.tsdb.lang.m3.common.WindowAggregationType;
 import org.opensearch.tsdb.lang.m3.m3ql.plan.nodes.BinaryPlanNode;
 import org.opensearch.tsdb.lang.m3.m3ql.plan.nodes.DiffPlanNode;
 import org.opensearch.tsdb.lang.m3.m3ql.plan.nodes.DividePlanNode;
@@ -26,6 +33,7 @@ import org.opensearch.tsdb.lang.m3.m3ql.plan.nodes.UnionPlanNode;
 import org.opensearch.tsdb.lang.m3.m3ql.plan.visitor.M3PlanVisitor;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -36,6 +44,41 @@ import static org.opensearch.common.Booleans.parseBooleanStrict;
  * M3ASTConverter is responsible for converting the M3QL AST into a plan.
  */
 public class M3ASTConverter {
+
+    @FunctionalInterface
+    private interface BinaryExpandHandler {
+        M3PlanNode expand(M3PlanNode lhs, M3PlanNode rhs, FunctionNode functionNode);
+    }
+
+    @FunctionalInterface
+    private interface UnaryExpandHandler {
+        M3PlanNode expand(FunctionNode functionNode);
+    }
+
+    @FunctionalInterface
+    private interface PipelineExpandHandler {
+        M3PlanNode expand(List<M3ASTNode> pipelineChildren, int lhsEndIndex, FunctionNode functionNode);
+    }
+
+    private final Map<String, BinaryExpandHandler> BINARY_EXPAND_REGISTRY = Map.of(
+        Constants.Functions.Binary.BURN_RATE,
+        this::expandBurnRate,
+        Constants.Functions.Binary.AS_BURN_RATE,
+        this::expandBurnRate
+    );
+
+    private final Map<String, PipelineExpandHandler> PIPELINE_EXPAND_REGISTRY = Map.of(
+        Constants.Functions.Binary.MULTI_BURN_RATE,
+        this::expandMultiBurnRate,
+        Constants.Functions.Binary.AS_MULTI_BURN_RATE,
+        this::expandMultiBurnRate
+    );
+
+    private final Map<String, UnaryExpandHandler> UNARY_EXPAND_REGISTRY = Map.of(
+        Constants.Functions.BURN_RATE_MULTIPLIER,
+        this::expandBurnRateMultiplier
+    );
+
     private static final Set<String> FUNCTIONS_WITH_PIPELINE_ARG = Set.of(
         Constants.Functions.Binary.AS_PERCENT,
         Constants.Functions.Binary.RATIO,
@@ -43,7 +86,11 @@ public class M3ASTConverter {
         Constants.Functions.Binary.SUBTRACT,
         Constants.Functions.Binary.DIVIDE,
         Constants.Functions.Binary.DIVIDE_SERIES,
-        Constants.Functions.Binary.INTERSECT
+        Constants.Functions.Binary.INTERSECT,
+        Constants.Functions.Binary.BURN_RATE,
+        Constants.Functions.Binary.AS_BURN_RATE,
+        Constants.Functions.Binary.MULTI_BURN_RATE,
+        Constants.Functions.Binary.AS_MULTI_BURN_RATE
     );
 
     /**
@@ -84,12 +131,23 @@ public class M3ASTConverter {
             throw new IllegalArgumentException("node must be of type PipelineNode or GroupNode");
         }
         boolean outsideBoundaryMarker = node instanceof GroupNode;
+        M3PlanNode result = handlePipelineChildren(node.getChildren());
 
+        if (outsideBoundaryMarker) {
+            M3PlanNode subPlan = M3PlanFinalizer.finalize(result);
+            ChainBoundaryMarker boundaryMarker = new ChainBoundaryMarker();
+            boundaryMarker.addChild(subPlan);
+            return boundaryMarker;
+        }
+        return result;
+    }
+
+    private M3PlanNode handlePipelineChildren(List<M3ASTNode> children) {
         M3PlanNode resultPlanNode = null;
         M3PlanNode danglingPlanNode = null;
 
-        for (int childIndex = 0; childIndex < node.getChildren().size(); childIndex++) {
-            M3ASTNode childNode = node.getChildren().get(childIndex);
+        for (int childIndex = 0; childIndex < children.size(); childIndex++) {
+            M3ASTNode childNode = children.get(childIndex);
 
             if (isFetchFunction(childNode)) {
                 M3PlanNode newChain = handleFetchFunction((FunctionNode) childNode);
@@ -118,7 +176,13 @@ public class M3ASTConverter {
                 assert resultPlanNode != null : "resultPlanNode should not be null when handling function with pipeline arg";
                 resultPlanNode = finalizePlanNode(resultPlanNode, danglingPlanNode);
                 danglingPlanNode = null;
-                resultPlanNode = handleFunctionWithPipelineArg(resultPlanNode, (FunctionNode) childNode);
+                String fnName = ((FunctionNode) childNode).getFunctionName();
+                PipelineExpandHandler pipelineHandler = PIPELINE_EXPAND_REGISTRY.get(fnName);
+                if (pipelineHandler != null) {
+                    resultPlanNode = pipelineHandler.expand(children, childIndex, (FunctionNode) childNode);
+                } else {
+                    resultPlanNode = handleFunctionWithPipelineArg(resultPlanNode, (FunctionNode) childNode);
+                }
             } else if (childNode instanceof GroupNode groupNode) {
                 M3PlanNode newChain = handlePipelineOrGroupNode(groupNode);
                 if (resultPlanNode == null) {
@@ -134,13 +198,6 @@ public class M3ASTConverter {
             }
         }
 
-        // Finalize the sub-plan, removing leftover boundary markers and
-        if (outsideBoundaryMarker) {
-            M3PlanNode subPlan = M3PlanFinalizer.finalize(finalizePlanNode(resultPlanNode, danglingPlanNode));
-            ChainBoundaryMarker boundaryMarker = new ChainBoundaryMarker();
-            boundaryMarker.addChild(subPlan);
-            return boundaryMarker;
-        }
         return finalizePlanNode(resultPlanNode, danglingPlanNode);
     }
 
@@ -275,11 +332,88 @@ public class M3ASTConverter {
             );
         }
         M3PlanNode rhs = handlePipelineOrGroupNode(child);
-        BinaryPlanNode binaryPlanNode = createBinaryPlanNode(functionNode);
 
+        String functionName = functionNode.getFunctionName();
+        BinaryExpandHandler expandHandler = BINARY_EXPAND_REGISTRY.get(functionName);
+        if (expandHandler != null) {
+            return expandHandler.expand(lhs, rhs, functionNode);
+        }
+
+        BinaryPlanNode binaryPlanNode = createBinaryPlanNode(functionNode);
         binaryPlanNode.addChild(lhs);
         binaryPlanNode.addChild(rhs);
         return binaryPlanNode;
+    }
+
+    // Expands burnRate(total) interval slo into:
+    // errors | moving(interval, sum) | asPercent(total | moving(interval, sum)) | scale(1/(100-slo)) | transformNull(0)
+    private M3PlanNode expandBurnRate(M3PlanNode lhs, M3PlanNode rhs, FunctionNode functionNode) {
+        validateChildCount(functionNode, 3);
+        String interval = extractIntervalParameter(functionNode, 1);
+        double slo = extractSloParameter(functionNode, 2);
+        return buildBurnRateChain(lhs, rhs, interval, slo);
+    }
+
+    // Expands multiBurnRate(total) interval1 interval2 slo into:
+    // min(burnRate(interval1), burnRate(interval2))
+    // Reprocesses the outer pipeline's preceding children twice to produce independent lhs subtrees
+    // with unique plan node IDs, avoiding the need for a deep copy.
+    private M3PlanNode expandMultiBurnRate(List<M3ASTNode> pipelineChildren, int lhsEndIndex, FunctionNode functionNode) {
+        validateChildCount(functionNode, 4);
+        String interval1 = extractIntervalParameter(functionNode, 1);
+        String interval2 = extractIntervalParameter(functionNode, 2);
+        double slo = extractSloParameter(functionNode, 3);
+
+        M3PlanNode rhs1 = handlePipelineOrGroupNode(functionNode.getChildren().getFirst());
+        M3PlanNode rhs2 = handlePipelineOrGroupNode(functionNode.getChildren().getFirst());
+
+        // Reprocess the preceding pipeline AST slice twice — each call produces a fresh
+        // plan subtree with unique IDs, so both burn rate chains are fully independent.
+        List<M3ASTNode> lhsSlice = pipelineChildren.subList(0, lhsEndIndex);
+        M3PlanNode lhs1 = handlePipelineChildren(lhsSlice);
+        M3PlanNode lhs2 = handlePipelineChildren(lhsSlice);
+
+        M3PlanNode burnRate1 = buildBurnRateChain(lhs1, rhs1, interval1, slo);
+        M3PlanNode burnRate2 = buildBurnRateChain(lhs2, rhs2, interval2, slo);
+
+        UnionPlanNode union = new UnionPlanNode(M3PlannerContext.generateId());
+        union.addChild(burnRate1);
+        union.addChild(burnRate2);
+
+        AggregationPlanNode min = new AggregationPlanNode(M3PlannerContext.generateId(), AggregationType.MIN, List.of());
+        min.addChild(union);
+        return min;
+    }
+
+    // Builds: lhs | moving(interval, sum) | asPercent(rhs | moving(interval, sum)) | scale(1/(100-slo)) | transformNull(0)
+    private M3PlanNode buildBurnRateChain(M3PlanNode lhs, M3PlanNode rhs, String interval, double slo) {
+        double scaleFactor = 1.0 / (100.0 - slo);
+
+        MovingPlanNode movingLeft = new MovingPlanNode(M3PlannerContext.generateId(), interval, WindowAggregationType.SUM);
+        movingLeft.addChild(lhs);
+
+        MovingPlanNode movingRight = new MovingPlanNode(M3PlannerContext.generateId(), interval, WindowAggregationType.SUM);
+        movingRight.addChild(rhs);
+
+        AsPercentPlanNode asPercent = new AsPercentPlanNode(M3PlannerContext.generateId(), List.of());
+        asPercent.addChild(movingLeft);
+        asPercent.addChild(movingRight);
+
+        ScalePlanNode scale = new ScalePlanNode(M3PlannerContext.generateId(), scaleFactor);
+        scale.addChild(asPercent);
+
+        TransformNullPlanNode transformNull = new TransformNullPlanNode(M3PlannerContext.generateId(), 0.0);
+        transformNull.addChild(scale);
+
+        return transformNull;
+    }
+
+    // Expands burnRateMultiplier(slo) into: scale(100 / (100 - slo))
+    private M3PlanNode expandBurnRateMultiplier(FunctionNode functionNode) {
+        validateChildCount(functionNode, 1);
+        double slo = extractSloParameter(functionNode, 0);
+        double scaleFactor = 100.0 / (100.0 - slo);
+        return new ScalePlanNode(M3PlannerContext.generateId(), scaleFactor);
     }
 
     private BinaryPlanNode createBinaryPlanNode(FunctionNode functionNode) {
@@ -345,13 +479,53 @@ public class M3ASTConverter {
         return false;
     }
 
-    // Handles a regular function node by creating the corresponding plan node and chaining appropriately
+    private void validateChildCount(FunctionNode functionNode, int expectedCount) {
+        int actual = functionNode.getChildren().size();
+        if (actual != expectedCount) {
+            throw new IllegalArgumentException(
+                functionNode.getFunctionName() + " expects exactly " + expectedCount + " arguments, got " + actual
+            );
+        }
+    }
+
+    private String extractIntervalParameter(FunctionNode functionNode, int index) {
+        M3ASTNode child = functionNode.getChildren().get(index);
+        if (!(child instanceof ValueNode valueNode)) {
+            throw new IllegalArgumentException("Argument 'interval' of " + functionNode.getFunctionName() + " must be a value");
+        }
+        String interval = Utils.stripDoubleQuotes(valueNode.getValue());
+        M3Duration.valueOf(interval);
+        return interval;
+    }
+
+    private double extractSloParameter(FunctionNode functionNode, int index) {
+        M3ASTNode child = functionNode.getChildren().get(index);
+        if (!(child instanceof ValueNode valueNode)) {
+            throw new IllegalArgumentException("Argument 'slo' of " + functionNode.getFunctionName() + " must be a value");
+        }
+        String raw = Utils.stripDoubleQuotes(valueNode.getValue());
+        double slo;
+        try {
+            slo = Double.parseDouble(raw);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("SLO must be a numeric value, got: " + raw, e);
+        }
+        if (slo <= 0 || slo >= 100) {
+            throw new IllegalArgumentException("SLO must be between 0 and 100 (exclusive), got: " + slo);
+        }
+        return slo;
+    }
+
+    // Handles a regular function node by creating the corresponding plan node and chaining appropriately.
+    // Checks the unary desugar registry first; if the function is a known desugared function, delegates to it.
     private M3PlanNode handleRegularFunction(M3PlanNode resultPlanNode, M3PlanNode danglingPlanNode, M3ASTNode currentNode) {
         if (!(currentNode instanceof FunctionNode functionNode)) {
             throw new IllegalStateException("Expecting regular function of type FunctionNode.");
         }
 
-        M3PlanNode planNode = M3PlanNodeFactory.create(functionNode);
+        UnaryExpandHandler expandHandler = UNARY_EXPAND_REGISTRY.get(functionNode.getFunctionName());
+        M3PlanNode planNode = expandHandler != null ? expandHandler.expand(functionNode) : M3PlanNodeFactory.create(functionNode);
+
         if (danglingPlanNode == null) {
             planNode.addChild(resultPlanNode);
         } else {

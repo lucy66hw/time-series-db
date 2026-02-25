@@ -47,10 +47,6 @@ public class Constants {
             "aliasByBucket",
             "aliasByHistogramBucket",
             "anomalies",
-            "asBurnRate",
-            "asMultiBurnRate",
-            "burnRate",
-            "burnRateMultiplier",
             "constantLine",
             "divideWhen",
             "histogramCDF",
@@ -58,7 +54,6 @@ public class Constants {
             "mockFetchLine",
             "mockFetchLinear",
             "mockFetchPeriodic",
-            "multiBurnRate",
             "nonNegativeDerivative",
             "nPercentile",
             "promHistogramPercentile",
@@ -321,6 +316,11 @@ public class Constants {
         public static final String ROUND = "round";
 
         /**
+         * burnRateMultiplier function name. Scales a series by 100 / (100 - slo).
+         */
+        public static final String BURN_RATE_MULTIPLIER = "burnRateMultiplier";
+
+        /**
          * Functions used for value comparison.
          */
         public static class ValueFilter {
@@ -540,6 +540,27 @@ public class Constants {
              * intersect function name.
              */
             public static final String INTERSECT = "intersect";
+
+            /**
+             * burnRate function name.
+             */
+            public static final String BURN_RATE = "burnRate";
+
+            /**
+             * asBurnRate function name (alias for burnRate).
+             */
+            public static final String AS_BURN_RATE = "asBurnRate";
+
+            /**
+             * multiBurnRate function name. Calculates minimum of two burn rates over two intervals.
+             */
+            public static final String MULTI_BURN_RATE = "multiBurnRate";
+
+            /**
+             * asMultiBurnRate function name (alias for multiBurnRate).
+             */
+            public static final String AS_MULTI_BURN_RATE = "asMultiBurnRate";
+
         }
 
         /**

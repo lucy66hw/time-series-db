@@ -1,0 +1,7 @@
+ROOT
+  PIPELINE
+    FUNCTION(fetch)
+      TAG_KEY(name)
+        TAG_VALUE(errors)
+    FUNCTION(burnRateMultiplier)
+      VALUE(99.9)
