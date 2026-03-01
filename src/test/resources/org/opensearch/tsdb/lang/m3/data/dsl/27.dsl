@@ -79,7 +79,7 @@
   },
   "track_total_hits" : -1,
   "aggregations" : {
-    "0" : {
+    "1" : {
       "filter" : {
         "time_range_pruner" : {
           "min_timestamp" : 913600000,
@@ -115,7 +115,7 @@
         }
       },
       "aggregations" : {
-        "0_unfold" : {
+        "1_unfold" : {
           "time_series_unfold" : {
             "min_timestamp" : 913600000,
             "max_timestamp" : 1001000000,
@@ -136,7 +136,7 @@
         }
       }
     },
-    "1" : {
+    "2" : {
       "filter" : {
         "time_range_pruner" : {
           "min_timestamp" : 913600000,
@@ -172,7 +172,7 @@
         }
       },
       "aggregations" : {
-        "1_unfold" : {
+        "2_unfold" : {
           "time_series_unfold" : {
             "min_timestamp" : 913600000,
             "max_timestamp" : 1001000000,
@@ -193,13 +193,13 @@
         }
       }
     },
-    "4" : {
+    "5" : {
       "coordinator_pipeline" : {
         "buckets_path" : [ ],
         "stages" : [
           {
             "type" : "as_percent",
-            "right_op_reference" : "1"
+            "right_op_reference" : "2"
           },
           {
             "type" : "scale",
@@ -211,10 +211,10 @@
           }
         ],
         "references" : {
-          "0" : "0>0_unfold",
-          "1" : "1>1_unfold"
+          "1" : "1>1_unfold",
+          "2" : "2>2_unfold"
         },
-        "inputReference" : "0"
+        "inputReference" : "1"
       }
     }
   }

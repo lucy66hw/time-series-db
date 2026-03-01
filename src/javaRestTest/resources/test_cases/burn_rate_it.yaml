@@ -1,0 +1,297 @@
+---
+# Integration tests for burnRate, burnRateMultiplier, and multiBurnRate functions.
+# Uses fetch (not mockFetch) for burnRate/multiBurnRate to ensure the lookback window
+# for moving() is properly covered by indexed data.
+#
+# Data layout: 20 data points at 1m step (0:00–0:19).
+# burnRate queries use range 0:05–0:10 (5m lookback fills from 0:00).
+# multiBurnRate queries use range 0:10–0:15 (10m lookback fills from 0:00).
+# slo=99 chosen so scale = 1/(100-99) = 1.0, avoiding floating-point drift.
+
+test_setup:
+  name: "Burn Rate Function Tests"
+  description: "Integration tests for burnRate, burnRateMultiplier, and multiBurnRate."
+
+  index_configs:
+    - name: "burn_rate_test"
+      shards: 1
+      replicas: 0
+
+test_case:
+  name: "Burn Rate Tests"
+
+  input_data_list:
+    - index_name: "burn_rate_test"
+      input_data_type: FIXED_INTERVAL
+      time_config:
+        min_timestamp: "2025-01-01T00:00:00Z"
+        max_timestamp: "2025-01-01T00:20:00Z"
+        step: "1m"
+      regular_metrics:
+        # Constant errors (4 per minute) and total (16 per minute) → 25% error rate
+        - labels: "name:errors_const"
+          values: [4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4]
+        - labels: "name:total_const"
+          values: [16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16]
+
+        # Zero errors for edge-case testing
+        - labels: "name:errors_zero"
+          values: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+
+        # Zero total for NaN → transformNull testing
+        - labels: "name:total_zero"
+          values: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+
+  queries:
+    # -----------------------------------------------------------------------
+    # burnRate
+    # -----------------------------------------------------------------------
+
+    # Constant data: errors=4, total=16, window=5m, slo=99
+    # moving(5m) of errors = 20, total = 80 → asPercent = 25.0 → scale(1.0) = 25.0
+    - name: "burnRate_constant_slo99"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_const; fetch name:errors_const | burnRate(total) 5m 99"
+      time_config:
+        min_timestamp: "2025-01-01T00:05:00Z"
+        max_timestamp: "2025-01-01T00:10:00Z"
+        step: "1m"
+      expected:
+        status: "success"
+        data:
+          - metric: {name: "errors_const", type: "ratios"}
+            values: [25.0, 25.0, 25.0, 25.0, 25.0]
+
+    # asBurnRate alias produces same result
+    - name: "asBurnRate_alias"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_const; fetch name:errors_const | asBurnRate(total) 5m 99"
+      time_config:
+        min_timestamp: "2025-01-01T00:05:00Z"
+        max_timestamp: "2025-01-01T00:10:00Z"
+        step: "1m"
+      expected:
+        status: "success"
+        data:
+          - metric: {name: "errors_const", type: "ratios"}
+            values: [25.0, 25.0, 25.0, 25.0, 25.0]
+
+    # Zero errors → burn rate is 0 (no errors consumed)
+    - name: "burnRate_zero_errors"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_const; fetch name:errors_zero | burnRate(total) 5m 99"
+      time_config:
+        min_timestamp: "2025-01-01T00:05:00Z"
+        max_timestamp: "2025-01-01T00:10:00Z"
+        step: "1m"
+      expected:
+        status: "success"
+        data:
+          - metric: {name: "errors_zero", type: "ratios"}
+            values: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # Zero total and zero errors → 0/0 = NaN → transformNull converts to 0
+    - name: "burnRate_zero_total"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_zero; fetch name:errors_zero | burnRate(total) 5m 99"
+      time_config:
+        min_timestamp: "2025-01-01T00:05:00Z"
+        max_timestamp: "2025-01-01T00:10:00Z"
+        step: "1m"
+      expected:
+        status: "success"
+        data:
+          - metric: {name: "errors_zero", type: "ratios"}
+            values: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # -----------------------------------------------------------------------
+    # burnRateMultiplier
+    # -----------------------------------------------------------------------
+
+    # burnRateMultiplier(99) → scale(100/(100-99)) = scale(100)
+    # 0.25 * 100 = 25.0, 0.5 * 100 = 50.0, 0.75 * 100 = 75.0
+    - name: "burnRateMultiplier_slo99"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "mockFetch 0.25,0.5,0.75 name:error_rate | burnRateMultiplier 99"
+      time_config:
+        min_timestamp: "2025-01-01T00:00:00Z"
+        max_timestamp: "2025-01-01T00:03:00Z"
+        step: "1m"
+      expected:
+        status: "success"
+        data:
+          - metric: {name: "error_rate"}
+            values: [25.0, 50.0, 75.0]
+
+    # burnRateMultiplier(90) → scale(100/(100-90)) = scale(10)
+    # 0.25 * 10 = 2.5, 0.5 * 10 = 5.0, 0.75 * 10 = 7.5
+    - name: "burnRateMultiplier_slo90"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "mockFetch 0.25,0.5,0.75 name:error_rate | burnRateMultiplier 90"
+      time_config:
+        min_timestamp: "2025-01-01T00:00:00Z"
+        max_timestamp: "2025-01-01T00:03:00Z"
+        step: "1m"
+      expected:
+        status: "success"
+        data:
+          - metric: {name: "error_rate"}
+            values: [2.5, 5.0, 7.5]
+
+    # -----------------------------------------------------------------------
+    # multiBurnRate
+    # -----------------------------------------------------------------------
+
+    # Constant data: both 10m and 5m windows yield 25% error rate → min = 25.0
+    - name: "multiBurnRate_constant"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_const; fetch name:errors_const | multiBurnRate(total) 10m 5m 99"
+      time_config:
+        min_timestamp: "2025-01-01T00:10:00Z"
+        max_timestamp: "2025-01-01T00:15:00Z"
+        step: "1m"
+      expected:
+        status: "success"
+        data:
+          - metric: {}
+            values: [25.0, 25.0, 25.0, 25.0, 25.0]
+
+    # Commutativity: swapping intervals gives the same result
+    - name: "multiBurnRate_commutativity"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_const; fetch name:errors_const | multiBurnRate(total) 5m 10m 99"
+      time_config:
+        min_timestamp: "2025-01-01T00:10:00Z"
+        max_timestamp: "2025-01-01T00:15:00Z"
+        step: "1m"
+      expected:
+        status: "success"
+        data:
+          - metric: {}
+            values: [25.0, 25.0, 25.0, 25.0, 25.0]
+
+    # asMultiBurnRate alias
+    - name: "asMultiBurnRate_alias"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_const; fetch name:errors_const | asMultiBurnRate(total) 10m 5m 99"
+      time_config:
+        min_timestamp: "2025-01-01T00:10:00Z"
+        max_timestamp: "2025-01-01T00:15:00Z"
+        step: "1m"
+      expected:
+        status: "success"
+        data:
+          - metric: {}
+            values: [25.0, 25.0, 25.0, 25.0, 25.0]
+
+    # Zero errors with multiBurnRate → both burn rates are 0, min is 0
+    - name: "multiBurnRate_zero_errors"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_const; fetch name:errors_zero | multiBurnRate(total) 10m 5m 99"
+      time_config:
+        min_timestamp: "2025-01-01T00:10:00Z"
+        max_timestamp: "2025-01-01T00:15:00Z"
+        step: "1m"
+      expected:
+        status: "success"
+        data:
+          - metric: {}
+            values: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # -----------------------------------------------------------------------
+    # Error handling — SLO validation
+    # -----------------------------------------------------------------------
+
+    - name: "burnRate_rejects_slo_zero"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_const; fetch name:errors_const | burnRate(total) 5m 0"
+      time_config:
+        min_timestamp: "2025-01-01T00:05:00Z"
+        max_timestamp: "2025-01-01T00:10:00Z"
+        step: "1m"
+      expected:
+        status: "failure"
+        error_message: "Query execution failed: status=400, error={\"error\":\"SLO must be between 0 and 100 (exclusive), got: 0.0\"}"
+
+    - name: "burnRate_rejects_slo_100"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_const; fetch name:errors_const | burnRate(total) 5m 100"
+      time_config:
+        min_timestamp: "2025-01-01T00:05:00Z"
+        max_timestamp: "2025-01-01T00:10:00Z"
+        step: "1m"
+      expected:
+        status: "failure"
+        error_message: "Query execution failed: status=400, error={\"error\":\"SLO must be between 0 and 100 (exclusive), got: 100.0\"}"
+
+    - name: "burnRate_rejects_slo_above_100"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_const; fetch name:errors_const | burnRate(total) 5m 150"
+      time_config:
+        min_timestamp: "2025-01-01T00:05:00Z"
+        max_timestamp: "2025-01-01T00:10:00Z"
+        step: "1m"
+      expected:
+        status: "failure"
+        error_message: "Query execution failed: status=400, error={\"error\":\"SLO must be between 0 and 100 (exclusive), got: 150.0\"}"
+
+    - name: "burnRateMultiplier_rejects_slo_zero"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "mockFetch 0.5 name:error_rate | burnRateMultiplier 0"
+      time_config:
+        min_timestamp: "2025-01-01T00:00:00Z"
+        max_timestamp: "2025-01-01T00:01:00Z"
+        step: "1m"
+      expected:
+        status: "failure"
+        error_message: "Query execution failed: status=400, error={\"error\":\"SLO must be between 0 and 100 (exclusive), got: 0.0\"}"
+
+    - name: "burnRateMultiplier_rejects_slo_100"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "mockFetch 0.5 name:error_rate | burnRateMultiplier 100"
+      time_config:
+        min_timestamp: "2025-01-01T00:00:00Z"
+        max_timestamp: "2025-01-01T00:01:00Z"
+        step: "1m"
+      expected:
+        status: "failure"
+        error_message: "Query execution failed: status=400, error={\"error\":\"SLO must be between 0 and 100 (exclusive), got: 100.0\"}"
+
+    - name: "multiBurnRate_rejects_slo_zero"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_const; fetch name:errors_const | multiBurnRate(total) 10m 5m 0"
+      time_config:
+        min_timestamp: "2025-01-01T00:10:00Z"
+        max_timestamp: "2025-01-01T00:15:00Z"
+        step: "1m"
+      expected:
+        status: "failure"
+        error_message: "Query execution failed: status=400, error={\"error\":\"SLO must be between 0 and 100 (exclusive), got: 0.0\"}"
+
+    - name: "multiBurnRate_rejects_slo_100"
+      type: "m3ql"
+      indices: "burn_rate_test"
+      query: "total = fetch name:total_const; fetch name:errors_const | multiBurnRate(total) 10m 5m 100"
+      time_config:
+        min_timestamp: "2025-01-01T00:10:00Z"
+        max_timestamp: "2025-01-01T00:15:00Z"
+        step: "1m"
+      expected:
+        status: "failure"
+        error_message: "Query execution failed: status=400, error={\"error\":\"SLO must be between 0 and 100 (exclusive), got: 100.0\"}"

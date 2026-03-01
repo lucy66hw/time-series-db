@@ -71,4 +71,5 @@ public class ScalePlanNode extends M3PlanNode {
         double value = Double.parseDouble(valueNode.getValue());
         return new ScalePlanNode(M3PlannerContext.generateId(), value);
     }
+
 }
