@@ -109,23 +109,12 @@ public class M3ASTConverter {
             throw new IllegalArgumentException("node must be of type PipelineNode or GroupNode");
         }
         boolean outsideBoundaryMarker = node instanceof GroupNode;
-        M3PlanNode result = handlePipelineChildren(node.getChildren());
 
-        if (outsideBoundaryMarker) {
-            M3PlanNode subPlan = M3PlanFinalizer.finalize(result);
-            ChainBoundaryMarker boundaryMarker = new ChainBoundaryMarker();
-            boundaryMarker.addChild(subPlan);
-            return boundaryMarker;
-        }
-        return result;
-    }
-
-    private M3PlanNode handlePipelineChildren(List<M3ASTNode> children) {
         M3PlanNode resultPlanNode = null;
         M3PlanNode danglingPlanNode = null;
 
-        for (int childIndex = 0; childIndex < children.size(); childIndex++) {
-            M3ASTNode childNode = children.get(childIndex);
+        for (int childIndex = 0; childIndex < node.getChildren().size(); childIndex++) {
+            M3ASTNode childNode = node.getChildren().get(childIndex);
 
             if (isFetchFunction(childNode)) {
                 M3PlanNode newChain = handleFetchFunction((FunctionNode) childNode);
@@ -155,7 +144,7 @@ public class M3ASTConverter {
                 resultPlanNode = finalizePlanNode(resultPlanNode, danglingPlanNode);
                 danglingPlanNode = null;
                 String fnName = ((FunctionNode) childNode).getFunctionName();
-                resultPlanNode = PIPELINE_EXPAND_REGISTRY.get(fnName).expand(children, childIndex, (FunctionNode) childNode);
+                resultPlanNode = PIPELINE_EXPAND_REGISTRY.get(fnName).expand(node.getChildren(), childIndex, (FunctionNode) childNode);
             } else if (isFunctionNodeWithPipelineArg(childNode)) {
                 assert resultPlanNode != null : "resultPlanNode should not be null when handling function with pipeline arg";
                 resultPlanNode = finalizePlanNode(resultPlanNode, danglingPlanNode);
@@ -176,7 +165,25 @@ public class M3ASTConverter {
             }
         }
 
-        return finalizePlanNode(resultPlanNode, danglingPlanNode);
+        M3PlanNode result = finalizePlanNode(resultPlanNode, danglingPlanNode);
+
+        if (outsideBoundaryMarker) {
+            M3PlanNode subPlan = M3PlanFinalizer.finalize(result);
+            ChainBoundaryMarker boundaryMarker = new ChainBoundaryMarker();
+            boundaryMarker.addChild(subPlan);
+            return boundaryMarker;
+        }
+        return result;
+    }
+
+    /**
+     * Converts a list of AST children into a plan by wrapping them in a synthetic PipelineNode.
+     * Used by burn_rate expansion methods that need to reprocess a subset of the outer pipeline's children.
+     */
+    private M3PlanNode handlePipelineChildren(List<M3ASTNode> children) {
+        PipelineNode syntheticPipeline = new PipelineNode();
+        syntheticPipeline.getChildren().addAll(children);
+        return handlePipelineOrGroupNode(syntheticPipeline);
     }
 
     // Finalizes the plan node by returning the dangling node if it exists, otherwise the result node.
@@ -337,19 +344,16 @@ public class M3ASTConverter {
 
     // Expands multiBurnRate(total) interval1 interval2 slo into:
     // min(burnRate(interval1), burnRate(interval2))
-    // Reprocesses the outer pipeline's preceding children twice to produce independent lhs subtrees
-    // with unique plan node IDs, avoiding the need for a deep copy.
     private M3PlanNode expandMultiBurnRate(List<M3ASTNode> pipelineChildren, int lhsEndIndex, FunctionNode functionNode) {
         validateChildCount(functionNode, 4);
         String interval1 = extractIntervalParameter(functionNode, 1);
         String interval2 = extractIntervalParameter(functionNode, 2);
         double slo = extractSloParameter(functionNode, 3);
 
-        M3PlanNode rhs1 = handlePipelineOrGroupNode(functionNode.getChildren().getFirst());
-        M3PlanNode rhs2 = handlePipelineOrGroupNode(functionNode.getChildren().getFirst());
+        M3ASTNode rhsAst = functionNode.getChildren().getFirst();
+        M3PlanNode rhs1 = handlePipelineChildren(List.of(rhsAst));
+        M3PlanNode rhs2 = handlePipelineChildren(List.of(rhsAst));
 
-        // Reprocess the preceding pipeline AST slice twice — each call produces a fresh
-        // plan subtree with unique IDs, so both burn rate chains are fully independent.
         List<M3ASTNode> lhsSlice = pipelineChildren.subList(0, lhsEndIndex);
         M3PlanNode lhs1 = handlePipelineChildren(lhsSlice);
         M3PlanNode lhs2 = handlePipelineChildren(lhsSlice);

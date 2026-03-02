@@ -9,6 +9,7 @@ package org.opensearch.tsdb.lang.m3.m3ql.plan;
 
 import org.opensearch.tsdb.lang.m3.common.AggregationType;
 import org.opensearch.tsdb.lang.m3.common.Constants;
+import org.opensearch.tsdb.lang.m3.common.Utils;
 import org.opensearch.tsdb.lang.m3.m3ql.parser.nodes.FunctionNode;
 import org.opensearch.tsdb.lang.m3.m3ql.parser.nodes.M3ASTNode;
 import org.opensearch.tsdb.lang.m3.m3ql.parser.nodes.ValueNode;
@@ -203,7 +204,13 @@ public class M3PlanNodeFactory {
         if (!(childNodes.getFirst() instanceof ValueNode valueNode)) {
             throw new IllegalArgumentException("Argument to burnRateMultiplier should be a value node");
         }
-        double slo = Double.parseDouble(valueNode.getValue());
+        String raw = Utils.stripDoubleQuotes(valueNode.getValue());
+        double slo;
+        try {
+            slo = Double.parseDouble(raw);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("SLO must be a numeric value, got: " + raw, e);
+        }
         if (!(slo > 0.0 && slo < 100.0)) {
             throw new IllegalArgumentException("SLO must be between 0 and 100 (exclusive), got: " + slo);
         }
