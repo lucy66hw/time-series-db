@@ -51,6 +51,12 @@ public class M3ASTConverterAliasTests extends OpenSearchTestCase {
         assertUnaryAliasProducesNode("sortSeries", "SORT");
     }
 
+    /**
+     * Helper method to test that a binary function alias produces the expected node type.
+     *
+     * @param aliasName the binary alias function name (e.g., "ratio", "divide", "subtract")
+     * @param expectedNodeType the expected node type in the plan (e.g., "AS_PERCENT", "DIVIDE_SERIES", "DIFF")
+     */
     private void assertBinaryAliasProducesNode(String aliasName, String expectedNodeType) {
         String query = "fetch name:a | " + aliasName + "(fetch name:b)";
         try (M3PlannerContext context = M3PlannerContext.create()) {
@@ -62,6 +68,12 @@ public class M3ASTConverterAliasTests extends OpenSearchTestCase {
         }
     }
 
+    /**
+     * Helper method to test that a unary function alias produces the expected node type.
+     *
+     * @param aliasName the unary alias function name (e.g., "sortSeries")
+     * @param expectedNodeType the expected node type in the plan (e.g., "SORT")
+     */
     private void assertUnaryAliasProducesNode(String aliasName, String expectedNodeType) {
         String query = "fetch name:a | " + aliasName + " avg";
         try (M3PlannerContext context = M3PlannerContext.create()) {
@@ -73,6 +85,9 @@ public class M3ASTConverterAliasTests extends OpenSearchTestCase {
         }
     }
 
+    /**
+     * Helper method to convert M3PlanNode to string for assertions.
+     */
     private String getPlanString(M3PlanNode planNode) {
         try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
             PrintStream ps = new PrintStream(baos, true, StandardCharsets.UTF_8);
